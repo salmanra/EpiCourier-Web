@@ -3,6 +3,7 @@ import Image from "next/image";
 import { notFound } from "next/navigation";
 import { NUTRIENT_NAME } from "../../../../lib/constants";
 import { getRecipeDetail } from "../../../../lib/utils";
+import RecipeReviewsSection from "@/components/ui/RecipeReviewsSection";
 
 export async function generateStaticParams() {
   const { data: recipes } = await supabase.from("Recipe").select("id");
@@ -83,6 +84,9 @@ export default async function RecipeDetailPage({ params }: { params: Promise<{ i
           ))}
         </div>
       </section>
+
+      {/* Reviews Section */}
+      <RecipeReviewsSection recipeId={recipe.id} />
     </div>
   );
 }
