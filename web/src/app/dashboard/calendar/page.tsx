@@ -82,7 +82,9 @@ export default function CalendarPage() {
         router.push("/signin");
         return;
       }
-      console.error("Failed to fetch events");
+      const errorData = await res.json().catch(() => ({ error: "Unknown error" }));
+      console.error("Failed to fetch events:", res.status, errorData);
+      alert(`Error fetching events: ${errorData.error || "Unknown error"}`);
       return;
     }
 
