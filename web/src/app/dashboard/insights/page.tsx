@@ -1,6 +1,8 @@
 "use client";
 import { useEffect, useState } from "react";
 import Image from "next/image";
+import ActivityHeatmap from "@/components/insights/ActivityHeatmap";
+import RecipeTrendsChart from "@/components/insights/RecipeTrendsChart";
 
 interface RecipeCount {
   recipe: {
@@ -46,6 +48,17 @@ export default function InsightsPage() {
         </p>
       </div>
 
+      {/* Activity Heatmap */}
+      <div className="mb-6">
+        <ActivityHeatmap />
+      </div>
+
+      {/* Recipe Trends Chart */}
+      <div className="mb-6">
+        <RecipeTrendsChart />
+      </div>
+
+      {/* Recipe History List */}
       <div className="rounded-lg bg-white p-6 shadow-sm">
         <h2 className="mb-4 text-xl font-semibold text-gray-800">
           Recipe History
