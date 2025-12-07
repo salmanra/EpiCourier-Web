@@ -4,10 +4,12 @@ import Pagination from "@/components/ui/pagenation";
 import RecipeCard from "@/components/ui/recipecard";
 import SearchBar from "@/components/ui/searchbar";
 import FavoritesSidebar from "@/components/ui/FavoritesSidebar";
+import RecipeComparisonToolbar from "@/components/ui/RecipeComparisonToolbar";
+import { ComparisonProvider } from "@/context/ComparisonContext";
 import { useRecipes } from "@/hooks/use-recipe";
 import { useState } from "react";
 
-export default function RecipesPage() {
+function RecipesPageContent() {
   const [query, setQuery] = useState("");
   const [ingredientIds, setIngredientIds] = useState<number[]>([]);
   const [tagIds, setTagIds] = useState<number[]>([]);
@@ -65,6 +67,17 @@ export default function RecipesPage() {
           <FavoritesSidebar />
         </div>
       </div>
+
+      {/* Comparison Toolbar */}
+      <RecipeComparisonToolbar />
     </div>
+  );
+}
+
+export default function RecipesPage() {
+  return (
+    <ComparisonProvider>
+      <RecipesPageContent />
+    </ComparisonProvider>
   );
 }
