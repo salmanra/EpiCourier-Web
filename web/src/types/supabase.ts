@@ -19,6 +19,7 @@ export type Database = {
           created_at: string
           date: string | null
           id: number
+          meal_type: string
           notes: string | null
           recipe_id: number | null
           status: boolean | null
@@ -29,6 +30,7 @@ export type Database = {
           created_at?: string
           date?: string | null
           id?: number
+          meal_type: string
           notes?: string | null
           recipe_id?: number | null
           status?: boolean | null
@@ -39,6 +41,7 @@ export type Database = {
           created_at?: string
           date?: string | null
           id?: number
+          meal_type?: string
           notes?: string | null
           recipe_id?: number | null
           status?: boolean | null
