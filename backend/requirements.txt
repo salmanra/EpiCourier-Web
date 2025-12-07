@@ -1,11 +1,8 @@
 fastapi
 uvicorn
 pydantic
-supabase
 python-dotenv
-torch
-pandas
-sentence-transformers
-scikit-learn
-transformers
 google-genai
+supabase
+pytest
+hypothesis
