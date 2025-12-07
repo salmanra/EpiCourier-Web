@@ -19,12 +19,12 @@ Create a `.env` file in the project root:
 
 ```
 
-NEXT_PUBLIC_SUPABASE_URL=[https://YOUR_PROJECT.supabase.co](https://YOUR_PROJECT.supabase.co)
+NEXT_PUBLIC_SUPABASE_URL=https://YOUR_PROJECT.supabase.co
 NEXT_PUBLIC_SUPABASE_ANON_KEY=YOUR_SUPABASE_ANON_KEY
-
-# Backend API base URL
-
-BACKEND_URL=[http://localhost:8000](http://localhost:8000)
+# Gemini 2.5 Flash API key
+GEMINI_KEY=YOUR_GEMINI_KEY
+# Backend API base URL (optional for the frontend)
+BACKEND_URL=http://localhost:8000
 
 ```
 
