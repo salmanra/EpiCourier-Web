@@ -6,7 +6,12 @@ This repository hosts the **frontend** (Next.js + TypeScript + Tailwind CSS) and
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.17537732.svg)](https://doi.org/10.5281/zenodo.17537732)
 [![codecov](https://codecov.io/github/epicourier-team/Epicourier-Web/graph/badge.svg?token=TTLT1APZ44)](https://codecov.io/github/epicourier-team/Epicourier-Web)
 
-## 🎬 Demo Video
+
+## 🎬 V2.0 Demo Video
+
+https://github.com/user-attachments/assets/163714bf-e990-4a95-9b41-04cd1199b606
+
+## 🎬 V1.0 Demo Video
 [![Demo Video](https://img.youtube.com/vi/QW4FuDJqLx0/maxresdefault.jpg)](https://youtu.be/QW4FuDJqLx0)
 <br>
 **[Watch the demo on YouTube »](https://youtu.be/QW4FuDJqLx0)**
