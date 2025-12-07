@@ -1,21 +1,19 @@
-import os
+from pathlib import Path
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from api.recommender import create_meal_plan
-from supabase import Client, create_client
 from dotenv import load_dotenv
 
+from api.recommender import create_meal_plan
+
+_here = Path(__file__).resolve()
+load_dotenv(_here.parent.parent / ".env")
+load_dotenv(_here.parents[2] / ".env")
 load_dotenv()
 
-url: str = os.getenv("NEXT_PUBLIC_SUPABASE_URL")
-key: str = os.getenv("NEXT_PUBLIC_SUPABASE_ANON_KEY")
+app = FastAPI(title="EpiCourier Meal Recommender", version="0.2.0")
 
-supabase: Client = create_client(url, key)
-
-app = FastAPI()
-
-# Allow frontend (Next.js) to call API
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -25,29 +23,28 @@ app.add_middleware(
 )
 
 
-@app.get("/test")
-def test_endpoint():
-    data = supabase.table("Recipe").select("*").limit(5).execute()
-    return {"message": data.data}
-
-
 class RecommendRequest(BaseModel):
-    goal: str
-    num_meals: int = Field(..., alias="numMeals")
+    goal: str = Field(..., description="User's nutrition or fitness objective.")
+    num_meals: int = Field(..., alias="numMeals", ge=1, le=10, description="How many meals to include.")
 
     model_config = {"populate_by_name": True}
 
 
-@app.post("/recommender")
+class RecommendResponse(BaseModel):
+    goal_expanded: str
+    recipes: list[dict]
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
+@app.post("/recommender", response_model=RecommendResponse)
 def recommend_meals(req: RecommendRequest):
-    """Main recommender endpoint with input validation."""
-    # Validate goal
-    if not req.goal or not req.goal.strip():
-        raise HTTPException(status_code=400, detail="Goal cannot be empty")
+    goal = req.goal.strip()
+    if not goal:
+        raise HTTPException(status_code=400, detail="Goal cannot be empty.")
 
-    # Validate number of meals
-    if req.num_meals not in [3, 5, 7]:
-        raise HTTPException(status_code=400, detail="numMeals must be one of 3, 5, or 7")
-
-    plan, expanded_goal = create_meal_plan(req.goal, n_meals=req.num_meals)
-    return {"recipes": plan, "goal_expanded": expanded_goal}
+    meals, expanded = create_meal_plan(goal, req.num_meals)
+    return {"recipes": meals, "goal_expanded": expanded}

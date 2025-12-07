@@ -5,11 +5,15 @@ import { Loader2, UtensilsCrossed } from "lucide-react";
 import { useState } from "react";
 import ReactMarkdown from "react-markdown";
 import AddMealModal from "../../../components/ui/AddMealModal";
-import { supabase } from "../../../lib/supabaseClient";
 
 interface Recipe {
-  id: number;
+  id?: number;
   name: string;
+  summary?: string;
+  calories_kcal?: number;
+  protein_g?: number;
+  carbs_g?: number;
+  fats_g?: number;
   key_ingredients: string[];
   recipe: string;
   tags: string[];
@@ -57,42 +61,8 @@ export default function RecommendPage() {
         return;
       }
 
-      // backend sends expanded goal once, not per recipe
       setExpandedGoal(data.goal_expanded || "");
-      // attach Supabase Recipe.id to each recipe (if a matching name exists)
-      try {
-        const recipesFromBackend: Recipe[] = data.recipes || [];
-
-        const recipesWithIds = await Promise.all(
-          recipesFromBackend.map(async (r) => {
-            try {
-              const { data: row, error } = await supabase
-                .from("Recipe")
-                .select("id")
-                .eq("name", r.name)
-                .maybeSingle();
-
-              if (error) {
-                console.error("Supabase lookup error for", r.name, error);
-                return { ...r }; // return original if lookup fails
-              }
-
-              // row may be null if not found; keep id only when present
-              const id = row?.id ?? null;
-              return { ...r, id };
-            } catch (e) {
-              console.error("Unexpected error looking up recipe id:", e);
-              return { ...r };
-            }
-          })
-        );
-
-        setRecipes(recipesWithIds);
-      } catch (e) {
-        console.error("Could not import supabase client or fetch ids:", e);
-        // fallback to original data if anything goes wrong
-        setRecipes(data.recipes || []);
-      }
+      setRecipes(data.recipes || []);
     } catch (err: unknown) {
       console.error("Error fetching recommendations:", err);
       setError((err as { message: string }).message || "Unknown error occurred");
@@ -187,13 +157,16 @@ export default function RecommendPage() {
                         {recipe.name}
                       </h3>
 
+                      {recipe.summary && (
+                        <p className="mb-2 text-gray-700">
+                          <span className="font-semibold text-gray-900">Summary:</span>{" "}
+                          {recipe.summary}
+                        </p>
+                      )}
+
                       <p className="mb-2 text-gray-700">
                         <span className="font-semibold text-gray-900">Key Ingredients:</span>{" "}
                         {recipe.key_ingredients.join(", ")}
-                      </p>
-
-                      <p className="mb-2 whitespace-pre-line text-gray-700">
-                        <span className="font-semibold text-gray-900">Recipe:</span> {recipe.recipe}
                       </p>
 
                       <p className="mb-2 text-gray-700">
@@ -205,12 +178,44 @@ export default function RecommendPage() {
                         <span className="font-semibold text-gray-900">Reason:</span> {recipe.reason}
                       </p>
 
+                      <div className="mb-3 flex flex-wrap gap-3 text-sm text-gray-700">
+                        {typeof recipe.calories_kcal === "number" && (
+                          <span className="rounded-full bg-emerald-50 px-3 py-1 font-semibold text-emerald-700">
+                            {recipe.calories_kcal} kcal
+                          </span>
+                        )}
+                        {typeof recipe.protein_g === "number" && (
+                          <span className="rounded-full bg-blue-50 px-3 py-1 font-semibold text-blue-700">
+                            {recipe.protein_g} g protein
+                          </span>
+                        )}
+                        {typeof recipe.carbs_g === "number" && (
+                          <span className="rounded-full bg-amber-50 px-3 py-1 font-semibold text-amber-700">
+                            {recipe.carbs_g} g carbs
+                          </span>
+                        )}
+                        {typeof recipe.fats_g === "number" && (
+                          <span className="rounded-full bg-pink-50 px-3 py-1 font-semibold text-pink-700">
+                            {recipe.fats_g} g fats
+                          </span>
+                        )}
+                      </div>
+
+                      <p className="mb-2 whitespace-pre-line text-gray-700">
+                        <span className="font-semibold text-gray-900">Recipe:</span> {recipe.recipe}
+                      </p>
+
                       <button
                         onClick={(e) => {
                           e.preventDefault();
+                          if (!recipe.id) {
+                            alert("Recipe id unavailable from Supabase; cannot add to calendar.");
+                            return;
+                          }
                           setIsModalOpen(true);
                         }}
-                        className="mt-3 w-full rounded bg-blue-600 py-2 text-white hover:bg-blue-700"
+                        className="mt-3 w-full rounded bg-blue-600 py-2 text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+                        disabled={!recipe.id}
                       >
                         + Add to Calendar
                       </button>

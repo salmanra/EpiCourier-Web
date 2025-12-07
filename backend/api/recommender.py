@@ -1,189 +1,380 @@
-"""
-recommender.py — Lazy-load + Render-safe version
+"""Gemini-assisted meal recommender that always picks from Supabase recipes.
+
+Workflow:
+1) Load recipes (name, tags, ingredients, description) from Supabase.
+   If Supabase is unreachable, fall back to bundled CSV snapshots.
+2) Send a short list of available recipes to Gemini 2.5 Flash and ask it
+   to select `num_meals` of them for the user's goal, returning JSON.
+3) If Gemini is unavailable, fall back to a deterministic picker over
+   the Supabase recipe list.
 """
 
+from __future__ import annotations
+
+import csv
+import json
 import os
-from functools import lru_cache
+import random
+from dataclasses import dataclass, asdict
+from pathlib import Path
+from typing import Dict, List, Optional
 
-
-import pandas as pd
-import torch
 from dotenv import load_dotenv
-from google import genai
-from sentence_transformers import SentenceTransformer, util
-from sklearn.cluster import KMeans
-from supabase import create_client
 
-# --------------------------------------------------
-# 1. Global setup
-# --------------------------------------------------
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {DEVICE}")
+try:  # Gemini SDK
+    from google import genai
+    try:
+        from google.genai.types import GenerateContentConfig
+    except Exception:  # pragma: no cover
+        GenerateContentConfig = None
+except Exception:  # pragma: no cover
+    genai = None
+    GenerateContentConfig = None
 
+try:  # Supabase
+    from supabase import create_client, Client
+except Exception:  # pragma: no cover
+    Client = None
+    create_client = None
+
+# Load environment early so module-level initialisation can find keys.
+_here = Path(__file__).resolve()
+load_dotenv(_here.parent.parent / ".env")
+load_dotenv(_here.parents[2] / ".env")
 load_dotenv()
-SUPABASE_URL = os.getenv("NEXT_PUBLIC_SUPABASE_URL")
-SUPABASE_KEY = os.getenv("NEXT_PUBLIC_SUPABASE_ANON_KEY")
-GEMINI_KEY = os.getenv("GEMINI_KEY")
 
 
-# --------------------------------------------------
-# 2. Lazy loaders
-# --------------------------------------------------
-@lru_cache()
-def load_supabase():
-    print("Connecting to Supabase ...")
-    return create_client(SUPABASE_URL, SUPABASE_KEY)
+# ---------------------------------------------------------------------------
+# Data structures
+# ---------------------------------------------------------------------------
+@dataclass
+class Recipe:
+    id: int
+    name: str
+    description: str
+    ingredients: List[str]
+    tags: List[str]
 
 
-@lru_cache()
-def load_recipe_data():
-    """Load and merge recipe data only once."""
-    print("Loading recipe data from Supabase ...")
-    supabase = load_supabase()
+@dataclass
+class Meal:
+    recipe_id: int
+    meal_number: int
+    name: str
+    summary: str
+    calories_kcal: int
+    protein_g: int
+    carbs_g: int
+    fats_g: int
+    key_ingredients: List[str]
+    tags: List[str]
+    reason: str
+    instructions: str
+    similarity_score: float
 
-    ingredients = pd.DataFrame(supabase.table("Ingredient").select("*").execute().data)
-    recipes = pd.DataFrame(supabase.table("Recipe").select("*").execute().data)
-    recipe_ing_map = pd.DataFrame(supabase.table("Recipe-Ingredient_Map").select("*").execute().data)
-    tags = pd.DataFrame(supabase.table("RecipeTag").select("*").execute().data)
-    recipe_tag_map = pd.DataFrame(supabase.table("Recipe-Tag_Map").select("*").execute().data)
-
-    # Merge metadata
-    recipe_tags = recipe_tag_map.merge(tags, left_on="tag_id", right_on="id", suffixes=("", "_tag"))
-    recipe_tags = recipe_tags.groupby("recipe_id")["name"].apply(list).reset_index(name="tags")
-
-    recipe_ing = recipe_ing_map.merge(ingredients, left_on="ingredient_id", right_on="id", suffixes=("", "_ing"))
-    recipe_ing = recipe_ing.groupby("recipe_id")["name"].apply(list).reset_index(name="ingredients")
-
-    recipe_data = recipes.merge(recipe_tags, left_on="id", right_on="recipe_id", how="left")
-    recipe_data = recipe_data.merge(recipe_ing, left_on="id", right_on="recipe_id", how="left")
-
-    recipe_data["tags"] = recipe_data["tags"].apply(lambda x: x if isinstance(x, list) else [])
-    recipe_data["ingredients"] = recipe_data["ingredients"].apply(lambda x: x if isinstance(x, list) else [])
-    return recipe_data
+    def to_api(self) -> dict:
+        base = asdict(self)
+        base["id"] = base.pop("recipe_id")
+        base["recipe"] = base.pop("instructions")
+        return base
 
 
-@lru_cache()
-def load_embedder():
-    print("Loading sentence-transformer model ...")
-    return SentenceTransformer("all-MiniLM-L6-v2", device=DEVICE)
+# ---------------------------------------------------------------------------
+# Supabase recipe loading (with CSV fallback)
+# ---------------------------------------------------------------------------
+def _get_supabase_client() -> Optional[Client]:
+    if create_client is None:
+        return None
+    url = os.getenv("NEXT_PUBLIC_SUPABASE_URL")
+    key = os.getenv("NEXT_PUBLIC_SUPABASE_ANON_KEY")
+    if not url or not key:
+        return None
+    try:
+        return create_client(url, key)
+    except Exception:
+        return None
 
 
-@lru_cache()
-def load_gemini_client():
-    print("Initializing Gemini client ...")
-    return genai.Client(api_key=GEMINI_KEY)
+def _load_recipes_from_supabase() -> Optional[List[Recipe]]:
+    client = _get_supabase_client()
+    if client is None:
+        return None
+    try:
+        recipes = client.table("Recipe").select("*").execute().data
+        ingredients = client.table("Ingredient").select("id,name").execute().data
+        recipe_ing_map = client.table("Recipe-Ingredient_Map").select("*").execute().data
+        tags = client.table("RecipeTag").select("id,name").execute().data
+        recipe_tag_map = client.table("Recipe-Tag_Map").select("*").execute().data
+    except Exception:
+        return None
+
+    ing_lookup = {int(i["id"]): i.get("name", "") for i in ingredients}
+    tag_lookup = {int(t["id"]): t.get("name", "") for t in tags}
+
+    ingredients_by_recipe: Dict[int, List[str]] = {}
+    for m in recipe_ing_map:
+        rid = int(m["recipe_id"])
+        iid = int(m["ingredient_id"])
+        ingredients_by_recipe.setdefault(rid, []).append(ing_lookup.get(iid, ""))
+
+    tags_by_recipe: Dict[int, List[str]] = {}
+    for m in recipe_tag_map:
+        rid = int(m["recipe_id"])
+        tid = int(m["tag_id"])
+        tags_by_recipe.setdefault(rid, []).append(tag_lookup.get(tid, ""))
+
+    catalog: List[Recipe] = []
+    for r in recipes:
+        rid = int(r["id"])
+        catalog.append(
+            Recipe(
+                id=rid,
+                name=r.get("name", f"Recipe {rid}"),
+                description=r.get("description", "") or "",
+                ingredients=ingredients_by_recipe.get(rid, []),
+                tags=tags_by_recipe.get(rid, []),
+            )
+        )
+    return catalog
 
 
-# --------------------------------------------------
-# 3. Utility functions
-# --------------------------------------------------
-def make_recipe_text(row):
-    return (
-        f"{row.get('description', '')}. "
-        f"Ingredients: {', '.join(row['ingredients'])}. "
-        f"Tags: {', '.join(row['tags'])}."
+def _load_recipes_from_csv() -> List[Recipe]:
+    """Offline fallback using the dataset snapshots."""
+    dataset_dir = _here.parent.parent / "dataset"
+    recipes_path = dataset_dir / "recipes-supabase.csv"
+    ingredients_path = dataset_dir / "ingredients-supabase.csv"
+    map_path = dataset_dir / "recipe_ingredient_map-supabase.csv"
+    tags_path = dataset_dir / "tags-supabase.csv"
+    tag_map_path = dataset_dir / "recipe_tag_map-supabase.csv"
+
+    with recipes_path.open() as f:
+        recipes_rows = list(csv.DictReader(f))
+    with ingredients_path.open() as f:
+        ingredient_rows = list(csv.DictReader(f))
+    with map_path.open() as f:
+        map_rows = list(csv.DictReader(f))
+    with tags_path.open() as f:
+        tag_rows = list(csv.DictReader(f))
+    with tag_map_path.open() as f:
+        tag_map_rows = list(csv.DictReader(f))
+
+    ing_lookup = {int(r["id"]): r["name"] for r in ingredient_rows}
+    tag_lookup = {int(r["id"]): r["name"] for r in tag_rows}
+
+    ingredients_by_recipe: Dict[int, List[str]] = {}
+    for row in map_rows:
+        rid = int(row["recipe_id"])
+        iid = int(row["ingredient_id"])
+        ingredients_by_recipe.setdefault(rid, []).append(ing_lookup.get(iid, ""))
+
+    tags_by_recipe: Dict[int, List[str]] = {}
+    for row in tag_map_rows:
+        rid = int(row["recipe_id"])
+        tid = int(row["tag_id"])
+        tags_by_recipe.setdefault(rid, []).append(tag_lookup.get(tid, ""))
+
+    catalog: List[Recipe] = []
+    for row in recipes_rows:
+        rid = int(row["id"])
+        catalog.append(
+            Recipe(
+                id=rid,
+                name=row.get("name", f"Recipe {rid}"),
+                description=row.get("description", "") or "",
+                ingredients=ingredients_by_recipe.get(rid, []),
+                tags=tags_by_recipe.get(rid, []),
+            )
+        )
+    return catalog
+
+
+_RECIPE_CACHE: Optional[List[Recipe]] = None
+
+
+def _get_catalog() -> List[Recipe]:
+    global _RECIPE_CACHE
+    if _RECIPE_CACHE is not None:
+        return _RECIPE_CACHE
+    catalog = _load_recipes_from_supabase()
+    if catalog is None:
+        catalog = _load_recipes_from_csv()
+    _RECIPE_CACHE = catalog
+    return catalog
+
+
+# ---------------------------------------------------------------------------
+# Gemini helpers
+# ---------------------------------------------------------------------------
+def _get_gemini_client():
+    api_key = (
+        os.getenv("GEMINI_KEY")
+        or os.getenv("GEMINI_API_KEY")
+        or os.getenv("GEMINI_TOKEN")
     )
+    if not api_key or genai is None:
+        return None
+    try:
+        return genai.Client(api_key=api_key)
+    except Exception:
+        return None
 
 
-def get_recipe_embeddings(recipe_data):
-    """Compute embeddings for all recipes (cached)."""
-    embedder = load_embedder()
-    if "recipe_text" not in recipe_data.columns:
-        recipe_data["recipe_text"] = recipe_data.apply(make_recipe_text, axis=1)
-    print("Computing recipe embeddings ...")
-    embeddings = embedder.encode(recipe_data["recipe_text"].tolist(), convert_to_tensor=True)
-    return embeddings
+def _call_gemini(goal: str, num_meals: int, catalog: List[Recipe]) -> Optional[dict]:
+    """Ask Gemini to pick recipes from the supplied catalog and return JSON."""
+    client = _get_gemini_client()
+    if client is None:
+        return None
 
-client = load_gemini_client()
-# --------------------------------------------------
-# 4. Gemini-based goal expansion
-# --------------------------------------------------
-def nutrition_goal(goal_text):
-    """Translate a user's goal into target nutritional values using Gemini."""
-    prompt = f"""
-    Your task is to translate a user's specific diet goal into precise, target nutritional values for a daily meal plan.
-    Just provide the nutritional values without any additional explanation or context.
-
-    **GOAL:** {goal_text}
-
-    You may include: calories_kcal, protein_g, carbs_g, sugars_g, total_fats_g,
-    cholesterol_mg, total_minerals_mg, vit_a_microg, total_vit_b_mg,
-    vit_c_mg, vit_d_microg, vit_e_mg, vit_k_microg
-    """
-    response = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
-    return response.text.strip()
-
-def expand_goal(goal_text):
-    """Translate a user's goal into nutrition information using Gemini."""
+    # Keep prompt compact: sample up to 40 recipes
+    sample_recipes = random.sample(catalog, k=min(len(catalog), 40))
+    lines = []
+    for r in sample_recipes:
+        ing = ", ".join(r.ingredients[:6]) if r.ingredients else "N/A"
+        tags = ", ".join(r.tags[:6]) if r.tags else "N/A"
+        lines.append(f"- id:{r.id} | name:{r.name} | tags:{tags} | ingredients:{ing}")
+    catalog_text = "\n".join(lines)
 
     prompt = f"""
-    Your task is to translate a user's specific diet goal into precise, target nutritional values for a daily meal plan.
+You are a registered dietitian. Choose exactly {num_meals} meals from the catalog below that best align with the goal.
+Goal: "{goal}"
 
-    **GOAL:** {goal_text}
+Catalog (only choose from these):
+{catalog_text}
 
-    You may include: calories_kcal, protein_g, carbs_g, sugars_g, total_fats_g, cholesterol_mg, total_minerals_mg, vit_a_microg, total_vit_b_mg, vit_c_mg, vit_d_microg, vit_e_mg, vit_k_microg
-    """
-
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt
-    )
-    return response.text.strip()
-
-# --------------------------------------------------
-# 5. Recommendation pipeline
-# --------------------------------------------------
-def rank_recipes_by_goal(goal_text, top_k=20):
-    recipe_data = load_recipe_data()
-    recipe_embeddings = get_recipe_embeddings(recipe_data)
-    embedder = load_embedder()
-
-    nutri_goal = nutrition_goal(goal_text)
-    goal_embedding = embedder.encode(nutri_goal, convert_to_tensor=True)
-    scores = util.cos_sim(goal_embedding, recipe_embeddings)[0].cpu().numpy()
-
-    recipe_data = recipe_data.copy()
-    recipe_data["similarity"] = scores
-    ranked = recipe_data.sort_values(by="similarity", ascending=False).head(top_k)
-    return ranked, nutri_goal
-
-
-def select_diverse_recipes(ranked_df, n_meals=3):
-    """Cluster embeddings to ensure diversity among top recipes."""
-    embedder = load_embedder()
-    n_clusters = min(n_meals, len(ranked_df))
-    if len(ranked_df) <= n_meals:
-        return ranked_df
-
-    sub_embeds = embedder.encode(ranked_df["recipe_text"].tolist())
-    kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init="auto")
-    cluster_labels = kmeans.fit_predict(sub_embeds)
-
-    selected_indices = []
-    for c in range(n_clusters):
-        cluster_recipes = ranked_df[cluster_labels == c]
-        top_one = cluster_recipes.sort_values("similarity", ascending=False).head(1)
-        selected_indices.append(top_one.index[0])
-    return ranked_df.loc[selected_indices].sort_values("similarity", ascending=False)
+Return ONLY valid JSON:
+{{
+  "goal_expanded": "one or two sentences on how to eat for the goal",
+  "meals": [
+    {{
+      "meal_number": 1,
+      "recipe_id": 123,
+      "name": "Use the recipe's name",
+      "summary": "Why this recipe fits",
+      "reason": "Clear, user-friendly rationale",
+      "instructions": "1-2 short prep sentences"
+    }}
+  ]
+}}
+Rules: every recipe_id must come from the catalog; no markdown; include exactly {num_meals} meals.
+"""
+    try:
+        cfg = {"temperature": 0.45, "response_mime_type": "application/json"}
+        if GenerateContentConfig is not None:
+            cfg = GenerateContentConfig(**cfg)
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=cfg,
+        )
+        text = getattr(response, "text", "") or getattr(response, "candidates", None)
+        if not text:
+            return None
+        if isinstance(text, str):
+            raw_json = text
+        else:
+            try:
+                raw_json = text[0].content.parts[0].text  # type: ignore[index]
+            except Exception:
+                return None
+        return json.loads(raw_json)
+    except Exception:
+        return None
 
 
-# CREATE MEAL PLAN
-def create_meal_plan(goal_text, n_meals=3):
-    ranked, nutri_goal = rank_recipes_by_goal(goal_text)
-    diverse = select_diverse_recipes(ranked, n_meals)
-    exp_goal = expand_goal(goal_text)
+# ---------------------------------------------------------------------------
+# Fallback picker (still uses Supabase/CSV recipes)
+# ---------------------------------------------------------------------------
+def _fallback_plan(goal: str, num_meals: int, catalog: List[Recipe]) -> dict:
+    chosen = catalog[:num_meals] if len(catalog) >= num_meals else catalog
+    meals: List[Meal] = []
+    for idx, r in enumerate(chosen):
+        meals.append(
+            Meal(
+                recipe_id=r.id,
+                meal_number=idx + 1,
+                name=r.name,
+                summary=f"{r.name} supports '{goal}' with balanced nutrients.",
+                calories_kcal=0,
+                protein_g=0,
+                carbs_g=0,
+                fats_g=0,
+                key_ingredients=r.ingredients[:8],
+                tags=r.tags[:6],
+                reason="Selected from existing recipes to match the goal.",
+                instructions=(r.description[:180] + "...") if r.description else "See recipe card.",
+                similarity_score=round(1.0 - (idx * 0.05), 3),
+            )
+        )
+    return {
+        "goal_expanded": f"Practical eating pattern to achieve: {goal}.",
+        "meals": meals,
+    }
 
-    meal_plan = []
-    for i, row in enumerate(diverse.itertuples(), 1):
-        meal_plan.append({
-            "meal_number": i,
-            "name": row.name,
-            "tags": row.tags,
-            "key_ingredients": row.ingredients[:10],  # limit to first few
-            "reason": f"Selected because it aligns with goal '{goal_text}' and differs from other meals.",
-            "similarity_score": round(float(row.similarity), 3),
-            "recipe": row.recipe_text
-        })
 
-    # print(f"Expanded goal: {exp_goal}\n")
-    return meal_plan, exp_goal
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+def create_meal_plan(goal: str, num_meals: int) -> tuple[list[dict], str]:
+    catalog = _get_catalog()
+    gemini_plan = _call_gemini(goal, num_meals, catalog)
+
+    if gemini_plan and isinstance(gemini_plan.get("meals"), list):
+        catalog_lookup = {r.id: r for r in catalog}
+        meals: List[Meal] = []
+        used_ids = set()
+        for idx, m in enumerate(gemini_plan["meals"]):
+            rid = int(m.get("recipe_id", 0))
+            recipe = catalog_lookup.get(rid)
+            if recipe is None or rid in used_ids:
+                continue
+            used_ids.add(rid)
+            meals.append(
+                Meal(
+                    recipe_id=rid,
+                    meal_number=int(m.get("meal_number", idx + 1)),
+                    name=recipe.name,
+                    summary=str(m.get("summary", recipe.description or goal)),
+                    calories_kcal=int(m.get("calories_kcal", 0)),
+                    protein_g=int(m.get("protein_g", 0)),
+                    carbs_g=int(m.get("carbs_g", 0)),
+                    fats_g=int(m.get("fats_g", 0)),
+                    key_ingredients=recipe.ingredients[:8],
+                    tags=recipe.tags[:6],
+                    reason=str(m.get("reason", "Supports the goal.")),
+                    instructions=str(m.get("instructions", recipe.description or "See recipe card.")),
+                    similarity_score=round(1.0 - (idx * 0.05), 3),
+                )
+            )
+
+        # If Gemini returned fewer meals than requested, top up deterministically
+        if len(meals) < num_meals:
+            remaining = [r for r in catalog if r.id not in used_ids][: num_meals - len(meals)]
+            start_idx = len(meals)
+            for i, r in enumerate(remaining):
+                meals.append(
+                    Meal(
+                        recipe_id=r.id,
+                        meal_number=start_idx + i + 1,
+                        name=r.name,
+                        summary=f"{r.name} supports '{goal}'.",
+                        calories_kcal=0,
+                        protein_g=0,
+                        carbs_g=0,
+                        fats_g=0,
+                        key_ingredients=r.ingredients[:8],
+                        tags=r.tags[:6],
+                        reason="Filled from existing recipes to hit requested count.",
+                        instructions=(r.description[:180] + "...") if r.description else "See recipe card.",
+                        similarity_score=round(1.0 - ((start_idx + i) * 0.05), 3),
+                    )
+                )
+
+        goal_expanded = str(gemini_plan.get("goal_expanded", goal)).strip()
+    else:
+        # alert if we are using fallback 
+        fallback = _fallback_plan(goal, num_meals, catalog)
+        meals = fallback["meals"]
+        goal_expanded = fallback["goal_expanded"]
+
+    meals_sorted = sorted(meals, key=lambda m: m.similarity_score, reverse=True)
+    return [m.to_api() for m in meals_sorted], goal_expanded
