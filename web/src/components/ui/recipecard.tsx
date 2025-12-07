@@ -1,15 +1,55 @@
+"use client";
+
 import Image from "next/image";
 import Link from "next/link";
 import { useState } from "react";
 import { Recipe } from "../../types/data";
 import AddMealModal from "@/components/ui/AddMealModal";
+import { Heart } from "lucide-react";
+import { useUserFavorites } from "@/hooks/use-user-favorites";
 
 export default function RecipeCard({ recipe }: { recipe: Recipe }) {
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const { isFavorited, toggleFavorite } = useUserFavorites();
+  const [toggling, setToggling] = useState(false);
+
+  const liked = isFavorited(recipe.id);
+
+  const handleToggleLike = async () => {
+    setToggling(true);
+    try {
+      await toggleFavorite(recipe.id);
+    } catch (err) {
+      // silently fail
+    } finally {
+      setToggling(false);
+    }
+  };
+
   return (
-    <div className="flex flex-col rounded-lg border p-4 shadow-sm transition hover:shadow-lg">
+    <div className="relative flex flex-col rounded-lg border p-4 shadow-sm transition hover:shadow-lg">
+      {/* Heart button (top-right) */}
+      <button
+        disabled={toggling}
+        aria-pressed={liked}
+        aria-label={liked ? "Unfavorite recipe" : "Favorite recipe"}
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          handleToggleLike();
+        }}
+        className="absolute right-3 top-3 z-10 rounded-full bg-white p-1 shadow hover:scale-105 disabled:opacity-50"
+        title={liked ? "Unfavorite" : "Favorite"}
+      >
+        <Heart
+          className={`h-5 w-5 transition-colors ${
+            liked ? "text-red-500" : "text-gray-400"
+          }`}
+        />
+      </button>
+
       <Link
-        className="flex flex-col rounded-lg border p-4 shadow-sm transition hover:shadow-lg"
+        className="flex flex-col rounded-lg p-0"
         href={`/dashboard/recipes/${recipe.id}`}
       >
         {recipe.image_url && (
